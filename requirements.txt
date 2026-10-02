@@ -3,3 +3,8 @@ uvicorn[standard]
 pydantic
 python-dotenv
 openai
+sqlalchemy
+pyjwt
+pwdlib[argon2]
+python-multipart
+pytest

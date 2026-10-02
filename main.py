@@ -1,15 +1,29 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from models.schemas import EvaluationRequest
-from services.verifier import verify_proposal
 from fastapi.middleware.cors import CORSMiddleware
-from models.schemas import BorrowerProfile, LenderProfile
-from services.negotiation import find_best_deal
+
+from database import init_db
+from models.schemas import BorrowerProfile, EvaluationRequest, LenderProfile
+from routers.admin import router as admin_router
+from routers.auth import router as auth_router
+from routers.test_auth import router as test_auth_router
 from services.agents import borrower_agent, lender_agent
+from services.negotiation import find_best_deal
+from services.verifier import verify_proposal
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle events: automatically initialize SQLite database on startup."""
+    init_db()
+    yield
+
 
 app = FastAPI(
     title="SettleX API",
     description="AI-mediated financial negotiation backend",
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=lifespan
 )
 
 # Allow the Next.js frontend to communicate with FastAPI
@@ -22,6 +36,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Authentication and Administration routers
+app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
+app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
+app.include_router(test_auth_router, prefix="/api/test", tags=["test"])
 
 
 @app.get("/")
@@ -39,6 +58,7 @@ def health():
         "service": "SettleX backend"
     }
 
+
 @app.post("/api/loan/evaluate")
 def evaluate_loan(request: EvaluationRequest):
 
@@ -49,6 +69,7 @@ def evaluate_loan(request: EvaluationRequest):
     )
 
     return result
+
 
 @app.post("/api/negotiation/start")
 def start_negotiation(
@@ -62,6 +83,7 @@ def start_negotiation(
     )
 
     return result
+
 
 @app.post("/api/agents/test")
 def test_agents(
@@ -90,4 +112,3 @@ def test_agents(
         "borrower_agent": borrower_response,
         "lender_agent": lender_response
     }
-
