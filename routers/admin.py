@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from database import get_db
 from dependencies.auth import require_admin
 from models.auth_schemas import RoleUpdateRequest, UserResponse
+from models.match import Match
+from models.match_schemas import AdminMatchResponse
 from models.user import User, UserRole
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -155,3 +157,16 @@ def update_user_role(
     db.commit()
     db.refresh(user)
     return user
+
+
+@router.get(
+    "/matches",
+    response_model=List[AdminMatchResponse],
+    summary="List all matches across the system"
+)
+def list_all_matches(
+    db: Session = Depends(get_db)
+):
+    """Admin inspection endpoint returning match ID, borrower ID, lender ID, score, status, created date."""
+    matches = db.query(Match).order_by(Match.created_at.desc()).all()
+    return matches

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum as SAEnum
+from sqlalchemy.orm import relationship
 
 from database import Base
 
@@ -34,6 +35,20 @@ class User(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False
+    )
+
+    # Profile relationships
+    borrower_profile = relationship(
+        "BorrowerProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
+    lender_profile = relationship(
+        "LenderProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:
