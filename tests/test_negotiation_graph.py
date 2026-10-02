@@ -130,39 +130,19 @@ def create_sample_entities(db):
 
 
 # ===========================================================================
-# 1. LangGraph Engine Unit Tests
+# 1. Targeted LangGraph Engine Unit Tests (Cases 1 - 7)
 # ===========================================================================
 
-def test_graph_successful_agreement():
+def test_case_1_agreement_both_accept():
     """
-    Test a multi-round flow converging to an agreement:
-    Round 1: Borrower counters at 11%, Lender counters at 12%.
-    Round 2: Borrower accepts 12%, Lender accepts.
-    Verifier passes -> Agreement reached!
+    Case 1 — Agreement:
+    Borrower accepts
+    Lender independently accepts
+    Verifier passes
+    → agreement_reached
     """
-    borrower_responses = [
-        {"position": "counter", "reason": "Requesting 11.0%", "target_interest_rate": 11.0, "target_tenure_months": 36},
-        {"position": "accept", "reason": "12.0% is acceptable", "target_interest_rate": 12.0, "target_tenure_months": 36}
-    ]
-    lender_responses = [
-        {"position": "counter", "reason": "Offering 12.0%", "target_interest_rate": 12.0, "target_tenure_months": 36}
-    ]
-
-    b_idx = [0]
-    l_idx = [0]
-
-    def mock_borrower(b_prof, current_offer=None):
-        resp = borrower_responses[min(b_idx[0], len(borrower_responses) - 1)]
-        b_idx[0] += 1
-        return resp
-
-    def mock_lender(l_prof, current_offer=None):
-        resp = lender_responses[min(l_idx[0], len(lender_responses) - 1)]
-        l_idx[0] += 1
-        return resp
-
-    with patch("services.negotiation_graph.borrower_agent", side_effect=mock_borrower), \
-         patch("services.negotiation_graph.lender_agent", side_effect=mock_lender):
+    with patch("services.negotiation_graph.borrower_agent", return_value={"position": "accept", "reason": "Offer satisfies borrower"}), \
+         patch("services.negotiation_graph.lender_agent", return_value={"position": "accept", "reason": "Offer satisfies lender"}):
 
         initial_state: NegotiationState = {
             "session_id": 1,
@@ -170,69 +150,102 @@ def test_graph_successful_agreement():
             "lender_id": 1,
             "borrower_profile": {
                 "loan_amount": 500000.0,
-                "monthly_income": 100000.0,
-                "monthly_expenses": 30000.0,
-                "existing_emi": 5000.0,
                 "max_emi": 35000.0,
                 "max_interest_rate": 14.0,
                 "preferred_tenure": 36,
                 "max_tenure": 48,
-                "collateral_required": False
             },
             "lender_profile": {
                 "max_loan_amount": 1000000.0,
                 "min_interest_rate": 10.0,
                 "max_tenure": 60,
-                "min_expected_return": 8.0,
-                "collateral_required": False,
-                "available_capacity": 1000000.0
             },
-            "round_number": 1,
+            "current_offer": {
+                "amount": 500000.0,
+                "interest_rate": 12.0,
+                "tenure_months": 36,
+                "upfront_payment": 0.0,
+            },
             "max_rounds": 6,
-            "current_offer": None,
-            "negotiation_history": []
         }
 
-        final_state = negotiation_graph.invoke(initial_state)
+        result = negotiation_graph.invoke(initial_state)
 
-        assert final_state["agreement_found"] is True
-        assert final_state["status"] == SessionStatus.AGREEMENT_REACHED.value
-        assert final_state["round_number"] == 2
-        assert final_state["final_proposal"] is not None
-        assert final_state["final_proposal"]["interest_rate"] == 12.0
-        assert final_state["verification_result"]["valid"] is True
-        assert len(final_state["negotiation_history"]) >= 3
+        assert result["agreement_found"] is True
+        assert result["status"] == SessionStatus.AGREEMENT_REACHED.value
+        assert result["borrower_position"] == "accept"
+        assert result["lender_position"] == "accept"
+        assert result["verification_result"]["valid"] is True
+        assert result["final_proposal"]["interest_rate"] == 12.0
 
 
-def test_graph_multi_round_trace():
+def test_case_2_borrower_accepts_lender_rejects():
     """
-    Validates a 3-round synthetic trace as described in prompt:
-    Round 1: Borrower proposal -> Lender counter
-    Round 2: Borrower counter -> Lender counter
-    Round 3: Borrower accept -> Verifier PASSED -> Agreement FOUND
+    Case 2 — Borrower accepts but lender rejects:
+    Borrower accepts
+    Lender rejects
+    → no agreement / rejected
     """
-    borrower_responses = [
-        {"position": "counter", "reason": "Round 1 proposal", "target_interest_rate": 10.5, "target_tenure_months": 36},
-        {"position": "counter", "reason": "Round 2 counter", "target_interest_rate": 11.5, "target_tenure_months": 36},
-        {"position": "accept", "reason": "Round 3 accept", "target_interest_rate": 12.0, "target_tenure_months": 36},
-    ]
-    lender_responses = [
-        {"position": "counter", "reason": "Round 1 counter", "target_interest_rate": 13.0, "target_tenure_months": 36},
-        {"position": "counter", "reason": "Round 2 counter", "target_interest_rate": 12.0, "target_tenure_months": 36},
-    ]
+    with patch("services.negotiation_graph.borrower_agent", return_value={"position": "accept", "reason": "Borrower likes rate"}), \
+         patch("services.negotiation_graph.lender_agent", return_value={"position": "reject", "reason": "Lender risk threshold exceeded"}):
 
-    b_idx = [0]
-    l_idx = [0]
+        initial_state: NegotiationState = {
+            "session_id": 1,
+            "borrower_id": 1,
+            "lender_id": 1,
+            "borrower_profile": {
+                "loan_amount": 500000.0,
+                "max_emi": 35000.0,
+                "max_interest_rate": 14.0,
+                "preferred_tenure": 36,
+                "max_tenure": 48,
+            },
+            "lender_profile": {
+                "max_loan_amount": 1000000.0,
+                "min_interest_rate": 10.0,
+                "max_tenure": 60,
+            },
+            "current_offer": {
+                "amount": 500000.0,
+                "interest_rate": 10.5,
+                "tenure_months": 36,
+                "upfront_payment": 0.0,
+            },
+            "max_rounds": 6,
+        }
 
+        result = negotiation_graph.invoke(initial_state)
+
+        assert result["agreement_found"] is False
+        assert result["status"] == SessionStatus.REJECTED.value
+        assert result["decision"] == "reject"
+        assert result["borrower_position"] == "accept"
+        assert result["lender_position"] == "reject"
+
+
+def test_case_3_borrower_accepts_lender_counters():
+    """
+    Case 3 — Borrower accepts but lender counters:
+    Borrower accepts
+    Lender counters
+    → negotiation continues (does not finalize prematurely into agreement)
+    """
+    b_calls = [0]
+    l_calls = [0]
+
+    # In Round 1: Borrower accepts initial proposal, but Lender independently counters.
+    # In Round 2: Borrower accepts Lender's counter, and Lender independently accepts.
     def mock_b(prof, current_offer=None):
-        r = borrower_responses[min(b_idx[0], len(borrower_responses) - 1)]
-        b_idx[0] += 1
-        return r
+        b_calls[0] += 1
+        if b_calls[0] == 1:
+            return {"position": "accept", "reason": "Round 1 accept"}
+        return {"position": "accept", "reason": "Round 2 accept"}
 
     def mock_l(prof, current_offer=None):
-        r = lender_responses[min(l_idx[0], len(lender_responses) - 1)]
-        l_idx[0] += 1
-        return r
+        l_calls[0] += 1
+        if l_calls[0] == 1:
+            return {"position": "counter", "reason": "Lender wants 12.5%", "target_interest_rate": 12.5, "target_tenure_months": 36}
+        return {"position": "accept", "reason": "Lender agrees to 12.5%"}
 
     with patch("services.negotiation_graph.borrower_agent", side_effect=mock_b), \
          patch("services.negotiation_graph.lender_agent", side_effect=mock_l):
@@ -243,7 +256,6 @@ def test_graph_multi_round_trace():
             "lender_id": 1,
             "borrower_profile": {
                 "loan_amount": 500000.0,
-                "monthly_income": 100000.0,
                 "max_emi": 35000.0,
                 "max_interest_rate": 14.0,
                 "preferred_tenure": 36,
@@ -254,111 +266,85 @@ def test_graph_multi_round_trace():
                 "min_interest_rate": 10.0,
                 "max_tenure": 60,
             },
-            "max_rounds": 6
+            "max_rounds": 6,
         }
 
         result = negotiation_graph.invoke(initial_state)
 
+        # Confirm negotiation progressed beyond Round 1
+        assert b_calls[0] == 2
+        assert l_calls[0] == 2
+        assert result["round_number"] == 2
         assert result["agreement_found"] is True
         assert result["status"] == SessionStatus.AGREEMENT_REACHED.value
-        assert result["round_number"] == 3
-        assert result["verification_result"]["valid"] is True
-        assert result["final_proposal"]["interest_rate"] == 12.0
+        assert result["final_proposal"]["interest_rate"] == 12.5
 
 
-def test_graph_borrower_rejection():
-    """Test outright rejection by borrower."""
-    with patch("services.negotiation_graph.borrower_agent", return_value={"position": "reject", "reason": "Rates too high"}):
-        initial_state: NegotiationState = {
-            "session_id": 1,
-            "borrower_id": 1,
-            "lender_id": 1,
-            "borrower_profile": {
-                "loan_amount": 500000.0,
-                "max_emi": 35000.0,
-                "max_interest_rate": 14.0,
-                "preferred_tenure": 36,
-                "max_tenure": 48,
-            },
-            "lender_profile": {
-                "max_loan_amount": 1000000.0,
-                "min_interest_rate": 10.0,
-                "max_tenure": 60,
-            },
-            "max_rounds": 6
-        }
-
-        result = negotiation_graph.invoke(initial_state)
-        assert result["agreement_found"] is False
-        assert result["status"] == SessionStatus.REJECTED.value
-        assert result["decision"] == "reject"
-
-
-def test_graph_lender_rejection():
-    """Test outright rejection by lender."""
-    with patch("services.negotiation_graph.borrower_agent", return_value={"position": "counter", "target_interest_rate": 11.0, "target_tenure_months": 36}), \
-         patch("services.negotiation_graph.lender_agent", return_value={"position": "reject", "reason": "Tenure unviable"}):
-        initial_state: NegotiationState = {
-            "session_id": 1,
-            "borrower_id": 1,
-            "lender_id": 1,
-            "borrower_profile": {
-                "loan_amount": 500000.0,
-                "max_emi": 35000.0,
-                "max_interest_rate": 14.0,
-                "preferred_tenure": 36,
-                "max_tenure": 48,
-            },
-            "lender_profile": {
-                "max_loan_amount": 1000000.0,
-                "min_interest_rate": 10.0,
-                "max_tenure": 60,
-            },
-            "max_rounds": 6
-        }
-
-        result = negotiation_graph.invoke(initial_state)
-        assert result["agreement_found"] is False
-        assert result["status"] == SessionStatus.REJECTED.value
-
-
-def test_graph_round_limit_reached():
-    """Test graph termination when reaching max_rounds with no agreement."""
-    with patch("services.negotiation_graph.borrower_agent", return_value={"position": "counter", "target_interest_rate": 10.0, "target_tenure_months": 36}), \
-         patch("services.negotiation_graph.lender_agent", return_value={"position": "counter", "target_interest_rate": 13.0, "target_tenure_months": 36}):
-        initial_state: NegotiationState = {
-            "session_id": 1,
-            "borrower_id": 1,
-            "lender_id": 1,
-            "borrower_profile": {
-                "loan_amount": 500000.0,
-                "max_emi": 35000.0,
-                "max_interest_rate": 14.0,
-                "preferred_tenure": 36,
-                "max_tenure": 48,
-            },
-            "lender_profile": {
-                "max_loan_amount": 1000000.0,
-                "min_interest_rate": 10.0,
-                "max_tenure": 60,
-            },
-            "max_rounds": 2
-        }
-
-        result = negotiation_graph.invoke(initial_state)
-        assert result["agreement_found"] is False
-        assert result["status"] == SessionStatus.NO_AGREEMENT.value
-        assert result["round_number"] == 2
-
-
-def test_graph_invalid_proposal_rejected_by_verifier():
+def test_case_4_lender_accepts_borrower_counters():
     """
-    Test when agents agree on an invalid proposal that violates hard constraints.
-    The verifier must flag valid=False, and agreement must be rejected.
+    Case 4 — Lender accepts but borrower counters:
+    Borrower counters
+    Lender accepts
+    → negotiation continues (does not finalize prematurely into agreement)
+    """
+    b_calls = [0]
+    l_calls = [0]
+
+    # In Round 1: Borrower counters at 11%, Lender accepts. Since Borrower countered, negotiation continues!
+    # In Round 2: Borrower confirms acceptance, Lender confirms acceptance.
+    def mock_b(prof, current_offer=None):
+        b_calls[0] += 1
+        if b_calls[0] == 1:
+            return {"position": "counter", "reason": "Borrower wants 11%", "target_interest_rate": 11.0, "target_tenure_months": 36}
+        return {"position": "accept", "reason": "Borrower confirms 11%"}
+
+    def mock_l(prof, current_offer=None):
+        l_calls[0] += 1
+        return {"position": "accept", "reason": "Lender accepts 11%"}
+
+    with patch("services.negotiation_graph.borrower_agent", side_effect=mock_b), \
+         patch("services.negotiation_graph.lender_agent", side_effect=mock_l):
+
+        initial_state: NegotiationState = {
+            "session_id": 1,
+            "borrower_id": 1,
+            "lender_id": 1,
+            "borrower_profile": {
+                "loan_amount": 500000.0,
+                "max_emi": 35000.0,
+                "max_interest_rate": 14.0,
+                "preferred_tenure": 36,
+                "max_tenure": 48,
+            },
+            "lender_profile": {
+                "max_loan_amount": 1000000.0,
+                "min_interest_rate": 10.0,
+                "max_tenure": 60,
+            },
+            "max_rounds": 6,
+        }
+
+        result = negotiation_graph.invoke(initial_state)
+
+        # Confirm that Round 1 did not prematurely conclude: it looped to Round 2
+        assert b_calls[0] == 2
+        assert l_calls[0] == 2
+        assert result["round_number"] == 2
+        assert result["agreement_found"] is True
+        assert result["final_proposal"]["interest_rate"] == 11.0
+
+
+def test_case_5_invalid_final_offer():
+    """
+    Case 5 — Invalid final offer:
+    Both agents accept
+    Verifier rejects
+    → no agreement / rejected
     """
     # 25% interest rate violates borrower's max rate of 14%
     with patch("services.negotiation_graph.borrower_agent", return_value={"position": "accept", "target_interest_rate": 25.0, "target_tenure_months": 36}), \
          patch("services.negotiation_graph.lender_agent", return_value={"position": "accept", "target_interest_rate": 25.0, "target_tenure_months": 36}):
+
         initial_state: NegotiationState = {
             "session_id": 1,
             "borrower_id": 1,
@@ -379,20 +365,202 @@ def test_graph_invalid_proposal_rejected_by_verifier():
                 "amount": 500000.0,
                 "interest_rate": 25.0,
                 "tenure_months": 36,
-                "upfront_payment": 0.0
+                "upfront_payment": 0.0,
             },
-            "max_rounds": 6
+            "max_rounds": 6,
         }
 
         result = negotiation_graph.invoke(initial_state)
+
         assert result["agreement_found"] is False
         assert result["status"] == SessionStatus.REJECTED.value
         assert result["verification_result"]["valid"] is False
-        assert len(result["verification_result"]["violations"]) > 0
+        assert "Interest rate exceeds borrower's maximum." in result["verification_result"]["violations"]
+
+
+def test_case_6_round_limit():
+    """
+    Case 6 — Round limit:
+    Negotiation terminates at configured maximum rounds.
+    """
+    with patch("services.negotiation_graph.borrower_agent", return_value={"position": "counter", "target_interest_rate": 10.0, "target_tenure_months": 36}), \
+         patch("services.negotiation_graph.lender_agent", return_value={"position": "counter", "target_interest_rate": 13.0, "target_tenure_months": 36}):
+
+        initial_state: NegotiationState = {
+            "session_id": 1,
+            "borrower_id": 1,
+            "lender_id": 1,
+            "borrower_profile": {
+                "loan_amount": 500000.0,
+                "max_emi": 35000.0,
+                "max_interest_rate": 14.0,
+                "preferred_tenure": 36,
+                "max_tenure": 48,
+            },
+            "lender_profile": {
+                "max_loan_amount": 1000000.0,
+                "min_interest_rate": 10.0,
+                "max_tenure": 60,
+            },
+            "max_rounds": 3,
+        }
+
+        result = negotiation_graph.invoke(initial_state)
+
+        assert result["agreement_found"] is False
+        assert result["status"] == SessionStatus.NO_AGREEMENT.value
+        assert result["round_number"] == 3
+
+
+def test_case_7_llm_failure_safe_fallback():
+    """
+    Case 7 — LLM failure:
+    Fallback response does not create an invalid agreement.
+    Deterministic counter is triggered and verified.
+    """
+    def broken_llm(*args, **kwargs):
+        raise RuntimeError("OpenAI rate limit or network timeout")
+
+    with patch("services.negotiation_graph.borrower_agent", side_effect=broken_llm), \
+         patch("services.negotiation_graph.lender_agent", side_effect=broken_llm):
+
+        initial_state: NegotiationState = {
+            "session_id": 1,
+            "borrower_id": 1,
+            "lender_id": 1,
+            "borrower_profile": {
+                "loan_amount": 500000.0,
+                "max_emi": 35000.0,
+                "max_interest_rate": 14.0,
+                "preferred_tenure": 36,
+                "max_tenure": 48,
+            },
+            "lender_profile": {
+                "max_loan_amount": 1000000.0,
+                "min_interest_rate": 10.0,
+                "max_tenure": 60,
+            },
+            "max_rounds": 2,
+        }
+
+        result = negotiation_graph.invoke(initial_state)
+
+        # Even with failed LLMs, no unhandled crash occurs and no accidental agreement is made
+        assert result["agreement_found"] is False
+        assert result["status"] == SessionStatus.NO_AGREEMENT.value
+        # Negotiation history holds fallback counters with verified proposals
+        assert len(result["negotiation_history"]) >= 2
+        for evt in result["negotiation_history"]:
+            assert evt["action"] == "counter"
+            assert "verification" in evt
+            assert evt["verification"]["valid"] is True
 
 
 # ===========================================================================
-# 2. Database Persistence and Runner Tests
+# 2. Section 12 Deterministic End-to-End Scenario Test
+# ===========================================================================
+
+def test_section_12_deterministic_end_to_end_scenario():
+    """
+    Section 12 Scenario:
+    Borrower:
+      loan = ₹5,00,000
+      max interest = 14%
+      preferred tenure = 42
+      max tenure = 60
+      max EMI = ₹16,000
+
+    Lender:
+      max loan = ₹7,50,000
+      min interest = 10%
+      max tenure = 60
+      capacity >= ₹5,00,000
+
+    Trace:
+      Round 1: Borrower counters at 10.5% -> Lender counters at 13.0%
+      Round 2: Borrower counters at 11.5% -> Lender counters at 12.0%
+      Round 3: Borrower accepts 12.0% -> Lender independently accepts 12.0%
+      Verifier passes -> Agreement reached
+    """
+    borrower_responses = [
+        {"position": "counter", "reason": "Requesting 10.5% starting rate", "target_interest_rate": 10.5, "target_tenure_months": 42},
+        {"position": "counter", "reason": "Willing to counter at 11.5%", "target_interest_rate": 11.5, "target_tenure_months": 42},
+        {"position": "accept", "reason": "12.0% is acceptable", "target_interest_rate": 12.0, "target_tenure_months": 42},
+    ]
+    lender_responses = [
+        {"position": "counter", "reason": "Need 13.0% for risk spread", "target_interest_rate": 13.0, "target_tenure_months": 42},
+        {"position": "counter", "reason": "Can lower to 12.0%", "target_interest_rate": 12.0, "target_tenure_months": 42},
+        {"position": "accept", "reason": "Lender independently agrees to 12.0%", "target_interest_rate": 12.0, "target_tenure_months": 42},
+    ]
+
+    b_idx = [0]
+    l_idx = [0]
+
+    def mock_b(prof, current_offer=None):
+        r = borrower_responses[min(b_idx[0], len(borrower_responses) - 1)]
+        b_idx[0] += 1
+        return r
+
+    def mock_l(prof, current_offer=None):
+        r = lender_responses[min(l_idx[0], len(lender_responses) - 1)]
+        l_idx[0] += 1
+        return r
+
+    with patch("services.negotiation_graph.borrower_agent", side_effect=mock_b), \
+         patch("services.negotiation_graph.lender_agent", side_effect=mock_l):
+
+        initial_state: NegotiationState = {
+            "session_id": 999,
+            "borrower_id": 1,
+            "lender_id": 1,
+            "borrower_profile": {
+                "loan_amount": 500000.0,
+                "monthly_income": 100000.0,
+                "max_emi": 16000.0,
+                "max_interest_rate": 14.0,
+                "preferred_tenure": 42,
+                "max_tenure": 60,
+                "collateral_required": False,
+            },
+            "lender_profile": {
+                "max_loan_amount": 750000.0,
+                "min_interest_rate": 10.0,
+                "max_tenure": 60,
+                "min_expected_return": 8.0,
+                "collateral_required": False,
+                "available_capacity": 600000.0,
+            },
+            "max_rounds": 6,
+        }
+
+        result = negotiation_graph.invoke(initial_state)
+
+        assert result["agreement_found"] is True
+        assert result["status"] == SessionStatus.AGREEMENT_REACHED.value
+        assert result["round_number"] == 3
+        assert result["final_proposal"]["interest_rate"] == 12.0
+        assert result["final_proposal"]["tenure_months"] == 42
+        assert result["final_proposal"]["amount"] == 500000.0
+
+        # Verify mathematical EMI affordability constraint
+        assert result["verification_result"]["valid"] is True
+        assert result["verification_result"]["emi"] < 16000.0  # EMI at 12% for 42m is ~₹14,646
+        assert len(result["negotiation_history"]) == 6
+
+        # Check explicit offer ownership recorded
+        actions = [(e["round"], e["agent"], e["action"]) for e in result["negotiation_history"]]
+        assert actions == [
+            (1, "borrower", "counter"),
+            (1, "lender", "counter"),
+            (2, "borrower", "counter"),
+            (2, "lender", "counter"),
+            (3, "borrower", "accept"),
+            (3, "lender", "accept"),
+        ]
+
+
+# ===========================================================================
+# 3. Database Persistence and Runner Tests
 # ===========================================================================
 
 def test_run_negotiation_session_db_persistence():
@@ -411,13 +579,13 @@ def test_run_negotiation_session_db_persistence():
             status=SessionStatus.PENDING.value,
             current_round=1,
             max_rounds=6,
-            agreement_found=False
+            agreement_found=False,
         )
         db.add(session)
         db.commit()
         db.refresh(session)
 
-        # Mock agents to reach agreement in Round 1
+        # Mock agents to independently reach agreement in Round 1
         with patch("services.negotiation_graph.borrower_agent", return_value={"position": "accept", "reason": "Terms match"}), \
              patch("services.negotiation_graph.lender_agent", return_value={"position": "accept", "reason": "Terms match"}):
 
@@ -438,12 +606,18 @@ def test_run_negotiation_session_db_persistence():
             assert all(o.session_id == session.id for o in offers)
             assert any(o.agent_type == AgentType.BORROWER.value for o in offers)
             assert any(o.agent_type == AgentType.LENDER.value for o in offers)
+
+            # Re-running an already completed session does not corrupt history
+            rerun_res = run_negotiation_session(session.id, db)
+            assert rerun_res["status"] == SessionStatus.AGREEMENT_REACHED.value
+            offers_after_rerun = db.query(NegotiationOffer).filter_by(session_id=session.id).all()
+            assert len(offers_after_rerun) == len(offers)
     finally:
         db.close()
 
 
 # ===========================================================================
-# 3. FastAPI Endpoint Integration Tests
+# 4. FastAPI Endpoint Integration Tests
 # ===========================================================================
 
 def test_create_session_endpoint_success(client: TestClient):
@@ -458,7 +632,7 @@ def test_create_session_endpoint_success(client: TestClient):
     res = client.post(
         "/api/negotiations/session",
         json={"match_id": match_id},
-        headers={"Authorization": f"Bearer {token}"}
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert res.status_code == 201
     data = res.json()
@@ -480,7 +654,7 @@ def test_create_session_duplicate_prevention(client: TestClient):
     res1 = client.post(
         "/api/negotiations/session",
         json={"match_id": match_id},
-        headers={"Authorization": f"Bearer {token}"}
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert res1.status_code == 201
     session_id_1 = res1.json()["session_id"]
@@ -489,11 +663,10 @@ def test_create_session_duplicate_prevention(client: TestClient):
     res2 = client.post(
         "/api/negotiations/session",
         json={"match_id": match_id},
-        headers={"Authorization": f"Bearer {token}"}
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert res2.status_code == 200 or res2.status_code == 201
     assert res2.json()["session_id"] == session_id_1
-
 
 
 def test_create_session_match_not_accepted(client: TestClient):
@@ -504,7 +677,7 @@ def test_create_session_match_not_accepted(client: TestClient):
             borrower_id=b_prof.id,
             lender_id=l_prof.id,
             match_score=80.0,
-            status=MatchStatus.PENDING.value
+            status=MatchStatus.PENDING.value,
         )
         db.add(pending_match)
         db.commit()
@@ -517,7 +690,7 @@ def test_create_session_match_not_accepted(client: TestClient):
     res = client.post(
         "/api/negotiations/session",
         json={"match_id": m_id},
-        headers={"Authorization": f"Bearer {token}"}
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert res.status_code == 400
     assert "Match must be 'accepted'" in res.json()["detail"]
@@ -533,7 +706,7 @@ def test_start_and_get_negotiation_session_api(client: TestClient):
             lender_id=l_prof.id,
             status=SessionStatus.PENDING.value,
             current_round=1,
-            max_rounds=6
+            max_rounds=6,
         )
         db.add(session)
         db.commit()
@@ -549,7 +722,7 @@ def test_start_and_get_negotiation_session_api(client: TestClient):
         # Start session via API
         res = client.post(
             f"/api/negotiations/{session_id}/start",
-            headers={"Authorization": f"Bearer {token}"}
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert res.status_code == 200
         data = res.json()
@@ -562,7 +735,7 @@ def test_start_and_get_negotiation_session_api(client: TestClient):
         # Get session via API
         get_res = client.get(
             f"/api/negotiations/{session_id}",
-            headers={"Authorization": f"Bearer {token}"}
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert get_res.status_code == 200
         get_data = get_res.json()
@@ -573,7 +746,7 @@ def test_start_and_get_negotiation_session_api(client: TestClient):
         # Get offers via API
         offers_res = client.get(
             f"/api/negotiations/{session_id}/offers",
-            headers={"Authorization": f"Bearer {token}"}
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert offers_res.status_code == 200
         offers_data = offers_res.json()
@@ -590,7 +763,7 @@ def test_unauthorized_user_forbidden(client: TestClient):
             lender_id=l_prof.id,
             status=SessionStatus.PENDING.value,
             current_round=1,
-            max_rounds=6
+            max_rounds=6,
         )
         db.add(session)
         db.commit()
@@ -603,13 +776,13 @@ def test_unauthorized_user_forbidden(client: TestClient):
     # Unauthorized access to get
     res = client.get(
         f"/api/negotiations/{session_id}",
-        headers={"Authorization": f"Bearer {token}"}
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert res.status_code == 403
 
     # Unauthorized access to start
     res_start = client.post(
         f"/api/negotiations/{session_id}/start",
-        headers={"Authorization": f"Bearer {token}"}
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert res_start.status_code == 403
