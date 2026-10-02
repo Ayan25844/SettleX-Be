@@ -50,6 +50,7 @@ def init_db() -> None:
     import models.user  # noqa: F401
     import models.profile  # noqa: F401
     import models.match  # noqa: F401
+    import models.negotiation  # noqa: F401
     Base.metadata.create_all(bind=engine)
 
 
