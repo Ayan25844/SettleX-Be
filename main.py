@@ -7,6 +7,7 @@ from models.schemas import BorrowerProfile, EvaluationRequest, LenderProfile
 from routers.admin import router as admin_router
 from routers.auth import router as auth_router
 from routers.matching import router as matching_router
+from routers.negotiations import router as negotiations_router
 from routers.profiles import borrower_router, lender_router
 from routers.test_auth import router as test_auth_router
 from services.agents import borrower_agent, lender_agent
@@ -50,6 +51,9 @@ app.include_router(lender_router)
 
 # Matching Engine router
 app.include_router(matching_router)
+
+# Multi-round AI Negotiation router
+app.include_router(negotiations_router)
 
 
 @app.get("/")
