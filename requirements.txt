@@ -8,3 +8,4 @@ pyjwt
 pwdlib[argon2]
 python-multipart
 pytest
+psycopg[binary]

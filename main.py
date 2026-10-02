@@ -6,6 +6,8 @@ from database import init_db
 from models.schemas import BorrowerProfile, EvaluationRequest, LenderProfile
 from routers.admin import router as admin_router
 from routers.auth import router as auth_router
+from routers.matching import router as matching_router
+from routers.profiles import borrower_router, lender_router
 from routers.test_auth import router as test_auth_router
 from services.agents import borrower_agent, lender_agent
 from services.negotiation import find_best_deal
@@ -14,7 +16,7 @@ from services.verifier import verify_proposal
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifecycle events: automatically initialize SQLite database on startup."""
+    """Lifecycle events: automatically initialize database tables on startup."""
     init_db()
     yield
 
@@ -22,7 +24,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="SettleX API",
     description="AI-mediated financial negotiation backend",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan
 )
 
@@ -41,6 +43,13 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
 app.include_router(test_auth_router, prefix="/api/test", tags=["test"])
+
+# Profile management routers
+app.include_router(borrower_router)
+app.include_router(lender_router)
+
+# Matching Engine router
+app.include_router(matching_router)
 
 
 @app.get("/")
