@@ -148,6 +148,21 @@ def initialize_node(state: NegotiationState) -> Dict[str, Any]:
     }
 
 
+def _sanitize_error_message(err: Exception) -> str:
+    """
+    Sanitizes an exception message to prevent accidental logging of API keys,
+    tokens, authorization headers, or private financial values.
+    """
+    import re
+    msg = str(err)
+    msg = re.sub(r"sk-[a-zA-Z0-9_\-]{10,}", "sk-***[REDACTED]***", msg)
+    msg = re.sub(r"Bearer\s+[a-zA-Z0-9_\-\.]+", "Bearer [REDACTED]", msg, flags=re.IGNORECASE)
+    msg = re.sub(r"([?&]api_key=)[^&]+", r"\1[REDACTED]", msg, flags=re.IGNORECASE)
+    if len(msg) > 350:
+        msg = msg[:350] + "... [truncated]"
+    return msg
+
+
 def borrower_agent_node(state: NegotiationState) -> Dict[str, Any]:
     """
     Borrower Advocate AI node:
@@ -159,21 +174,25 @@ def borrower_agent_node(state: NegotiationState) -> Dict[str, Any]:
     borrower_schema = _to_borrower_schema(state["borrower_profile"])
     lender_schema = _to_lender_schema(state["lender_profile"])
     current_offer = state.get("current_offer")
+    agent_error = None
 
     try:
         response = borrower_agent(borrower_schema, current_offer=current_offer)
         if isinstance(response, str):
             response = json.loads(response)
     except Exception as e:
-        logger.warning(
-            f"Borrower agent LLM execution error: {type(e).__name__}. Falling back to deterministic counter."
+        sanitized_msg = _sanitize_error_message(e)
+        logger.error(
+            f"[Agent Failure] Agent: Borrower Advocate | Exception: {type(e).__name__} | Details: {sanitized_msg}"
         )
+        agent_error = f"Borrower Advocate ({type(e).__name__}): {sanitized_msg}"
         response = {
             "position": "counter",
             "reason": "Deterministic fallback counter based on borrower profile preference.",
             "target_interest_rate": borrower_schema.max_interest_rate - 0.5,
             "target_tenure_months": borrower_schema.preferred_tenure,
         }
+
 
     pos = str(response.get("position", "counter")).lower().strip()
     history = list(state.get("negotiation_history", []))
@@ -286,20 +305,25 @@ def lender_agent_node(state: NegotiationState) -> Dict[str, Any]:
     borrower_schema = _to_borrower_schema(state["borrower_profile"])
     borrower_amount = float(state["borrower_profile"]["loan_amount"])
 
+    agent_error = None
+
     try:
         response = lender_agent(lender_schema, current_offer=current_offer)
         if isinstance(response, str):
             response = json.loads(response)
     except Exception as e:
-        logger.warning(
-            f"Lender agent LLM execution error: {type(e).__name__}. Falling back to deterministic counter."
+        sanitized_msg = _sanitize_error_message(e)
+        logger.error(
+            f"[Agent Failure] Agent: Lender Advocate | Exception: {type(e).__name__} | Details: {sanitized_msg}"
         )
+        agent_error = f"Lender Advocate ({type(e).__name__}): {sanitized_msg}"
         response = {
             "position": "counter",
             "reason": "Deterministic fallback counter based on lender minimum return criteria.",
             "target_interest_rate": lender_schema.min_interest_rate + 0.5,
             "target_tenure_months": lender_schema.max_tenure,
         }
+
 
     pos = str(response.get("position", "counter")).lower().strip()
 
