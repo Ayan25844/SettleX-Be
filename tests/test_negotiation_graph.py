@@ -16,6 +16,10 @@ from services.negotiation_graph import (
     negotiation_graph,
     run_negotiation_session,
     NegotiationState,
+    borrower_agent_node,
+    lender_agent_node,
+    verify_offer_node,
+    decide_next_step_node,
 )
 
 
@@ -786,3 +790,473 @@ def test_unauthorized_user_forbidden(client: TestClient):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert res_start.status_code == 403
+
+
+# ===========================================================================
+# Regression Tests for Counter-Offer Propagation
+# ===========================================================================
+
+def test_regression_borrower_counter_offer_propagation():
+    """
+    Regression Test:
+    Initial offer: 100,000, 12.12%, 42 months
+    Borrower counters with target_interest_rate = 11.5% (< 12.12%)
+    Expected:
+    - candidate_offer has interest_rate = 11.5%
+    - state['current_offer'] changes to 11.5%
+    - lender receives the updated 11.5% offer in Round 1
+    - lender's decision is based on 11.5%
+    - negotiation history records borrower's counter at 11.5% and lender's accept at 11.5%
+    - verifier ran and validated the 11.5% proposal
+    """
+    received_by_lender = []
+    b_calls = [0]
+
+    def mock_b(prof, current_offer=None):
+        b_calls[0] += 1
+        if b_calls[0] == 1:
+            return {
+                "position": "counter",
+                "reason": "Borrower requests rate reduction from 12.12% to 11.5%",
+                "target_interest_rate": 11.5,
+                "target_tenure_months": 42,
+            }
+        return {
+            "position": "accept",
+            "reason": f"Borrower confirms agreed terms of {current_offer.get('interest_rate')}%",
+        }
+
+    def mock_l(prof, current_offer=None):
+        received_by_lender.append(dict(current_offer) if current_offer else None)
+        return {
+            "position": "accept",
+            "reason": f"Lender accepts updated offer of {current_offer.get('interest_rate')}%",
+        }
+
+    with patch("services.negotiation_graph.borrower_agent", side_effect=mock_b), \
+         patch("services.negotiation_graph.lender_agent", side_effect=mock_l):
+
+        initial_state: NegotiationState = {
+            "session_id": 1,
+            "borrower_id": 1,
+            "lender_id": 1,
+            "borrower_profile": {
+                "loan_amount": 100000.0,
+                "monthly_income": 60000.0,
+                "monthly_expenses": 20000.0,
+                "existing_emi": 5000.0,
+                "max_emi": 20000.0,
+                "max_interest_rate": 14.0,
+                "preferred_tenure": 42,
+                "max_tenure": 48,
+            },
+            "lender_profile": {
+                "max_loan_amount": 1000000.0,
+                "min_interest_rate": 10.0,
+                "max_tenure": 60,
+                "min_expected_return": 1.05,
+            },
+            "current_offer": {
+                "amount": 100000.0,
+                "interest_rate": 12.12,
+                "tenure_months": 42,
+                "upfront_payment": 0.0,
+            },
+            "max_rounds": 6,
+        }
+
+        # Run graph
+        result = negotiation_graph.invoke(initial_state)
+
+        # 1. Verify lender received the updated offer with 11.5%, NOT 12.12%
+        assert len(received_by_lender) >= 1
+        assert received_by_lender[0]["interest_rate"] == 11.5
+        assert received_by_lender[0]["tenure_months"] == 42
+
+        # 2. Verify state['current_offer'] was updated to 11.5%
+        assert result["current_offer"]["interest_rate"] == 11.5
+
+        # 3. Verify agreement was reached at 11.5%
+        assert result["agreement_found"] is True
+        assert result["status"] == SessionStatus.AGREEMENT_REACHED.value
+        assert result["final_proposal"]["interest_rate"] == 11.5
+
+        # 4. Verify negotiation history contains borrower's counter at 11.5%
+        history = result["negotiation_history"]
+        b_event = next(e for e in history if e["agent"] == "borrower" and e["round"] == 1)
+        assert b_event["action"] == "counter"
+        assert b_event["offer"]["interest_rate"] == 11.5
+
+        l_event = next(e for e in history if e["agent"] == "lender" and e["round"] == 1)
+        assert l_event["action"] == "accept"
+        assert l_event["offer"]["interest_rate"] == 11.5
+
+        # 5. Verify verifier ran and validated the 11.5% proposal
+        assert b_event["verification"] is not None
+        assert b_event["verification"]["valid"] is True
+        assert b_event["verification"]["emi"] > 0
+
+
+def test_regression_lender_counter_offer_propagation():
+    """
+    Regression Test for Reverse Case:
+    Initial offer: 100,000, 11.0%, 36 months
+    Borrower accepts 11.0% in Round 1
+    Lender counters with 12.5% (> 11.0%)
+    Expected:
+    - lender counter updates current_offer to 12.5%
+    - in Round 2, borrower receives the updated 12.5% proposal
+    - borrower evaluates and accepts 12.5% in Round 2
+    - negotiation history records lender's counter at 12.5%
+    """
+    received_by_borrower = []
+
+    def mock_b(prof, current_offer=None):
+        received_by_borrower.append(dict(current_offer) if current_offer else None)
+        if len(received_by_borrower) == 1:
+            return {"position": "accept", "reason": "Borrower accepts initial 11.0%"}
+        return {"position": "accept", "reason": "Borrower accepts lender's counter of 12.5%"}
+
+    def mock_l(prof, current_offer=None):
+        if len(received_by_borrower) == 1:
+            return {
+                "position": "counter",
+                "reason": "Lender counters: hurdle requires 12.5%",
+                "target_interest_rate": 12.5,
+                "target_tenure_months": 36,
+            }
+        return {"position": "accept", "reason": "Lender confirms agreement at 12.5%"}
+
+    with patch("services.negotiation_graph.borrower_agent", side_effect=mock_b), \
+         patch("services.negotiation_graph.lender_agent", side_effect=mock_l):
+
+        initial_state: NegotiationState = {
+            "session_id": 2,
+            "borrower_id": 1,
+            "lender_id": 1,
+            "borrower_profile": {
+                "loan_amount": 100000.0,
+                "monthly_income": 60000.0,
+                "monthly_expenses": 20000.0,
+                "existing_emi": 5000.0,
+                "max_emi": 20000.0,
+                "max_interest_rate": 14.0,
+                "preferred_tenure": 36,
+                "max_tenure": 48,
+            },
+            "lender_profile": {
+                "max_loan_amount": 1000000.0,
+                "min_interest_rate": 10.0,
+                "max_tenure": 60,
+                "min_expected_return": 1.05,
+            },
+            "current_offer": {
+                "amount": 100000.0,
+                "interest_rate": 11.0,
+                "tenure_months": 36,
+                "upfront_payment": 0.0,
+            },
+            "max_rounds": 6,
+        }
+
+        result = negotiation_graph.invoke(initial_state)
+
+        # 1. Confirm borrower received 11.0% in Round 1, and 12.5% in Round 2
+        assert len(received_by_borrower) == 2
+        assert received_by_borrower[0]["interest_rate"] == 11.0
+        assert received_by_borrower[1]["interest_rate"] == 12.5
+
+        # 2. Confirm final proposal interest rate is 12.5%
+        assert result["final_proposal"]["interest_rate"] == 12.5
+        assert result["agreement_found"] is True
+        assert result["status"] == SessionStatus.AGREEMENT_REACHED.value
+
+        # 3. Confirm lender's counter was recorded in history
+        history = result["negotiation_history"]
+        l_counter_event = next(e for e in history if e["agent"] == "lender" and e["action"] == "counter")
+        assert l_counter_event["offer"]["interest_rate"] == 12.5
+        assert l_counter_event["verification"]["valid"] is True
+
+
+def test_exact_counter_propagation_flow_tests_1_to_6():
+    """
+    Direct unit & flow test for user-specified requirements:
+    TEST 1: Initial 12.12%, 42m -> Borrower counters to 11.70% -> Immediately current_offer = 11.70%, 42m
+    TEST 2: Lender receives 11.70%, not 12.12%
+    TEST 3: If lender counters to 11.95%, current_offer becomes 11.95%
+    TEST 4: Borrower then receives 11.95% in next evaluation
+    TEST 5: Verifier runs against the actual updated proposal each time
+    TEST 6: Negotiation history contains the actual terms of each proposal
+    """
+    initial_offer = {
+        "amount": 100000.0,
+        "interest_rate": 12.12,
+        "tenure_months": 42,
+        "upfront_payment": 0.0,
+    }
+
+    state: NegotiationState = {
+        "session_id": 999,
+        "borrower_id": 1,
+        "lender_id": 1,
+        "round_number": 1,
+        "max_rounds": 6,
+        "borrower_profile": {
+            "loan_amount": 100000.0,
+            "monthly_income": 60000.0,
+            "monthly_expenses": 20000.0,
+            "existing_emi": 5000.0,
+            "max_emi": 20000.0,
+            "max_interest_rate": 14.0,
+            "preferred_tenure": 42,
+            "max_tenure": 48,
+        },
+        "lender_profile": {
+            "max_loan_amount": 1000000.0,
+            "min_interest_rate": 10.0,
+            "max_tenure": 60,
+            "min_expected_return": 1.05,
+        },
+        "current_offer": dict(initial_offer),
+        "previous_offer": None,
+        "current_offer_by": None,
+        "borrower_position": None,
+        "lender_position": None,
+        "borrower_agent_response": None,
+        "lender_agent_response": None,
+        "verification_result": None,
+        "agreement_found": False,
+        "final_proposal": None,
+        "status": SessionStatus.ACTIVE.value,
+        "decision": None,
+        "negotiation_history": [],
+        "error": None,
+    }
+
+    # =========================================================================
+    # TEST 1: Borrower counters to 11.70%
+    # Expected immediately after borrower node: current_offer = 11.70%, 42 months
+    # =========================================================================
+    borrower_counter_resp = {
+        "position": "counter",
+        "reason": "12.12% is too high; requesting 11.70%",
+        "target_interest_rate": 11.70,
+        "target_tenure_months": 42,
+    }
+
+    with patch("services.negotiation_graph.borrower_agent", return_value=borrower_counter_resp):
+        b_node_output = borrower_agent_node(state)
+
+    # State assertion immediately after borrower node
+    assert b_node_output["borrower_position"] == "counter"
+    assert b_node_output["current_offer"]["interest_rate"] == 11.70
+    assert b_node_output["current_offer"]["tenure_months"] == 42
+    assert b_node_output["current_offer"]["interest_rate"] != 12.12
+    assert b_node_output["previous_offer"]["interest_rate"] == 12.12
+    assert b_node_output["current_offer_by"] == AgentType.BORROWER.value
+
+    # Merge borrower output into state
+    state.update(b_node_output)
+
+    # =========================================================================
+    # TEST 2: Lender receives 11.70%, not 12.12%
+    # TEST 3: If lender counters to 11.95%, current_offer becomes 11.95%
+    # =========================================================================
+    lender_received_offer = []
+
+    def mock_lender_counter(l_prof, current_offer=None):
+        lender_received_offer.append(dict(current_offer) if current_offer else None)
+        return {
+            "position": "counter",
+            "reason": "Yield hurdle requires 11.95%",
+            "target_interest_rate": 11.95,
+            "target_tenure_months": 42,
+        }
+
+    with patch("services.negotiation_graph.lender_agent", side_effect=mock_lender_counter):
+        l_node_output = lender_agent_node(state)
+
+    # TEST 2: Lender received 11.70%, not 12.12%
+    assert len(lender_received_offer) == 1
+    assert lender_received_offer[0]["interest_rate"] == 11.70
+    assert lender_received_offer[0]["interest_rate"] != 12.12
+
+    # TEST 3: Immediately after lender node, current_offer becomes 11.95%
+    assert l_node_output["lender_position"] == "counter"
+    assert l_node_output["current_offer"]["interest_rate"] == 11.95
+    assert l_node_output["current_offer"]["tenure_months"] == 42
+    assert l_node_output["previous_offer"]["interest_rate"] == 11.70
+    assert l_node_output["current_offer_by"] == AgentType.LENDER.value
+
+    # Merge lender output into state
+    state.update(l_node_output)
+
+    # =========================================================================
+    # TEST 5: Verifier runs against the actual updated proposal each time
+    # =========================================================================
+    v_output = verify_offer_node(state)
+    assert v_output["verification_result"]["valid"] is True
+    assert v_output["current_offer"]["interest_rate"] == 11.95
+    state.update(v_output)
+
+    # Advance state to Round 2
+    step_output = decide_next_step_node(state)
+    assert step_output["decision"] == "counter"
+    assert step_output["round_number"] == 2
+    assert step_output["current_offer"]["interest_rate"] == 11.95
+    state.update(step_output)
+
+    # =========================================================================
+    # TEST 4: Borrower then receives 11.95% in Round 2 evaluation
+    # =========================================================================
+    borrower_round2_received_offer = []
+
+    def mock_borrower_accept(b_prof, current_offer=None):
+        borrower_round2_received_offer.append(dict(current_offer) if current_offer else None)
+        return {
+            "position": "accept",
+            "reason": f"Borrower agrees to {current_offer.get('interest_rate')}%",
+        }
+
+    with patch("services.negotiation_graph.borrower_agent", side_effect=mock_borrower_accept):
+        b_node_round2_output = borrower_agent_node(state)
+
+    assert len(borrower_round2_received_offer) == 1
+    assert borrower_round2_received_offer[0]["interest_rate"] == 11.95
+    assert b_node_round2_output["borrower_position"] == "accept"
+    assert b_node_round2_output["current_offer"]["interest_rate"] == 11.95
+
+    # =========================================================================
+    # TEST 6: Negotiation history contains the actual terms of each proposal
+    # =========================================================================
+    history = state["negotiation_history"]
+    b1_event = next(e for e in history if e["agent"] == "borrower" and e["round"] == 1)
+    assert b1_event["action"] == "counter"
+    assert b1_event["offer"]["interest_rate"] == 11.70
+    assert b1_event["verification"]["valid"] is True
+
+    l1_event = next(e for e in history if e["agent"] == "lender" and e["round"] == 1)
+    assert l1_event["action"] == "counter"
+    assert l1_event["offer"]["interest_rate"] == 11.95
+    assert l1_event["verification"]["valid"] is True
+
+
+def test_api_counter_propagation_and_persistence(client: TestClient):
+    """
+    End-to-End API and DB persistence test:
+    Verifies that multi-round counters:
+    1. Propagate to current_offer and final_proposal in the API response.
+    2. Are persisted to NegotiationSession.current_offer and final_proposal.
+    3. Are persisted as individual NegotiationOffer records with exact numeric terms.
+    4. Are retrieved accurately by GET /api/negotiations/{session_id}.
+    """
+    db = TestingSessionLocal()
+    try:
+        b_user, l_user, _, b_prof, l_prof, match = create_sample_entities(db)
+        session = NegotiationSession(
+            match_id=match.id,
+            borrower_id=b_prof.id,
+            lender_id=l_prof.id,
+            status=SessionStatus.PENDING.value,
+            current_round=1,
+            max_rounds=6,
+        )
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+        session_id = session.id
+        token = register_and_login(client, b_user.full_name, b_user.email, "borrower")
+    finally:
+        db.close()
+
+    b_responses = [
+        {"position": "counter", "reason": "Borrower counters to 11.70%", "target_interest_rate": 11.70, "target_tenure_months": 36},
+        {"position": "accept", "reason": "Borrower accepts lender's counter of 11.95%"},
+    ]
+    l_responses = [
+        {"position": "counter", "reason": "Lender counters to 11.95%", "target_interest_rate": 11.95, "target_tenure_months": 36},
+        {"position": "accept", "reason": "Lender confirms agreement at 11.95%"},
+    ]
+
+    b_idx = [0]
+    l_idx = [0]
+
+    def mock_b(prof, current_offer=None):
+        r = b_responses[min(b_idx[0], len(b_responses) - 1)]
+        b_idx[0] += 1
+        return r
+
+    def mock_l(prof, current_offer=None):
+        r = l_responses[min(l_idx[0], len(l_responses) - 1)]
+        l_idx[0] += 1
+        return r
+
+    with patch("services.negotiation_graph.borrower_agent", side_effect=mock_b), \
+         patch("services.negotiation_graph.lender_agent", side_effect=mock_l):
+
+        res = client.post(
+            f"/api/negotiations/{session_id}/start",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert res.status_code == 200
+        data = res.json()
+
+        # 1. API response reflects updated terms
+        assert data["status"] == SessionStatus.AGREEMENT_REACHED.value
+        assert data["agreement_found"] is True
+        assert data["final_proposal"]["interest_rate"] == 11.95
+        assert data["final_proposal"]["tenure_months"] == 36
+        assert data["current_offer"]["interest_rate"] == 11.95
+
+        # History reflects exact counter terms
+        assert len(data["history"]) == 4
+        assert data["history"][0]["agent"] == "borrower"
+        assert data["history"][0]["action"] == "counter"
+        assert data["history"][0]["offer"]["interest_rate"] == 11.70
+
+        assert data["history"][1]["agent"] == "lender"
+        assert data["history"][1]["action"] == "counter"
+        assert data["history"][1]["offer"]["interest_rate"] == 11.95
+
+        assert data["history"][2]["agent"] == "borrower"
+        assert data["history"][2]["action"] == "accept"
+        assert data["history"][2]["offer"]["interest_rate"] == 11.95
+
+        assert data["history"][3]["agent"] == "lender"
+        assert data["history"][3]["action"] == "accept"
+        assert data["history"][3]["offer"]["interest_rate"] == 11.95
+
+        # 2. GET API returns persisted session and offers
+        get_res = client.get(
+            f"/api/negotiations/{session_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert get_res.status_code == 200
+        get_data = get_res.json()
+        assert get_data["agreement_found"] is True
+        assert get_data["final_proposal"]["interest_rate"] == 11.95
+        assert get_data["current_offer"]["interest_rate"] == 11.95
+
+        # 3. Direct DB checks
+        check_db = TestingSessionLocal()
+        try:
+            db_session = check_db.query(NegotiationSession).filter_by(id=session_id).first()
+            assert db_session.agreement_found is True
+            assert db_session.final_proposal["interest_rate"] == 11.95
+            assert db_session.current_offer["interest_rate"] == 11.95
+
+            db_offers = check_db.query(NegotiationOffer).filter_by(session_id=session_id).order_by(NegotiationOffer.id.asc()).all()
+            assert len(db_offers) == 4
+            assert db_offers[0].position == "counter"
+            assert db_offers[0].interest_rate == 11.70
+            assert db_offers[1].position == "counter"
+            assert db_offers[1].interest_rate == 11.95
+            assert db_offers[2].position == "accept"
+            assert db_offers[2].interest_rate == 11.95
+            assert db_offers[3].position == "accept"
+            assert db_offers[3].interest_rate == 11.95
+        finally:
+            check_db.close()
+
+
+
