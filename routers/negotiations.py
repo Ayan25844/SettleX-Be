@@ -31,7 +31,13 @@ def _session_response(
     session: NegotiationSession,
     history: Optional[List[Dict[str, Any]]] = None,
     verification: Optional[Dict[str, Any]] = None,
+    demo_mode: Optional[bool] = None,
 ) -> Dict[str, Any]:
+    from services.demo_negotiation import is_demo_mode
+
+    if demo_mode is None:
+        demo_mode = is_demo_mode()
+
     if history is None:
         history = [
             {
@@ -73,6 +79,7 @@ def _session_response(
         "final_proposal": session.final_proposal,
         "verification": verification,
         "history": history,
+        "demo_mode": demo_mode,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     }
@@ -171,6 +178,7 @@ def start_negotiation_session(
         session,
         history=result.get("negotiation_history", []),
         verification=result.get("verification_result"),
+        demo_mode=result.get("demo_mode"),
     )
 
 

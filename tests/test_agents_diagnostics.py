@@ -68,19 +68,11 @@ def test_parse_agent_json_response_empty():
 # 2. OpenAI Request Failure Distinctions
 # ===========================================================================
 
-def test_openai_request_failure_quota_rate_limit():
+def test_agent_request_failure_quota_rate_limit():
     """
     Distinguishes 429 quota exhaustion / rate limit errors from model or parsing errors.
     """
-    mock_client = MagicMock()
-    mock_response = MagicMock()
-    mock_response.status_code = 429
-    err = openai.RateLimitError(
-        message="You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.",
-        response=mock_response,
-        body={"error": {"code": "credit_balance_exhausted"}}
-    )
-    mock_client.chat.completions.create.side_effect = err
+    err = RuntimeError("429 RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'Generate Content API requests'")
 
     bp = BorrowerProfile(
         loan_amount=500000.0,
@@ -93,27 +85,18 @@ def test_openai_request_failure_quota_rate_limit():
         max_tenure=48,
     )
 
-    with patch("services.agents.get_openai_client", return_value=mock_client):
-        with pytest.raises(openai.RateLimitError) as exc_info:
+    with patch("services.agents._generate_gemini_content", side_effect=err):
+        with pytest.raises(RuntimeError) as exc_info:
             borrower_agent(bp, current_offer=None)
 
-        assert "credits remaining" in str(exc_info.value)
-        assert isinstance(exc_info.value, openai.RateLimitError)
+        assert "429" in str(exc_info.value) or "Quota exceeded" in str(exc_info.value)
 
 
-def test_openai_authentication_failure():
+def test_agent_authentication_failure():
     """
-    Distinguishes 401 invalid API key / authentication errors.
+    Distinguishes 401/403 invalid API key / authentication errors.
     """
-    mock_client = MagicMock()
-    mock_response = MagicMock()
-    mock_response.status_code = 401
-    err = openai.AuthenticationError(
-        message="Incorrect API key provided: sk-proj-12345***.",
-        response=mock_response,
-        body={"error": {"code": "invalid_api_key"}}
-    )
-    mock_client.chat.completions.create.side_effect = err
+    err = PermissionError("403 API_KEY_INVALID: The provided API key is invalid.")
 
     lp = LenderProfile(
         max_loan_amount=1000000.0,
@@ -122,26 +105,18 @@ def test_openai_authentication_failure():
         min_expected_return=8.0,
     )
 
-    with patch("services.agents.get_openai_client", return_value=mock_client):
-        with pytest.raises(openai.AuthenticationError) as exc_info:
+    with patch("services.agents._generate_gemini_content", side_effect=err):
+        with pytest.raises(PermissionError) as exc_info:
             lender_agent(lp, current_offer=None)
 
-        assert isinstance(exc_info.value, openai.AuthenticationError)
+        assert "403" in str(exc_info.value) or "API_KEY_INVALID" in str(exc_info.value)
 
 
-def test_openai_model_access_failure():
+def test_agent_model_access_failure():
     """
     Distinguishes 404 model not found or forbidden access errors.
     """
-    mock_client = MagicMock()
-    mock_response = MagicMock()
-    mock_response.status_code = 404
-    err = openai.NotFoundError(
-        message="The model 'gpt-4o-mini' does not exist or you do not have access to it.",
-        response=mock_response,
-        body={"error": {"code": "model_not_found"}}
-    )
-    mock_client.chat.completions.create.side_effect = err
+    err = LookupError("404 NOT_FOUND: models/unknown-model is not found for API version v1beta.")
 
     bp = BorrowerProfile(
         loan_amount=500000.0,
@@ -154,11 +129,11 @@ def test_openai_model_access_failure():
         max_tenure=48,
     )
 
-    with patch("services.agents.get_openai_client", return_value=mock_client):
-        with pytest.raises(openai.NotFoundError) as exc_info:
+    with patch("services.agents._generate_gemini_content", side_effect=err):
+        with pytest.raises(LookupError) as exc_info:
             borrower_agent(bp, current_offer=None)
 
-        assert isinstance(exc_info.value, openai.NotFoundError)
+        assert "404" in str(exc_info.value) or "NOT_FOUND" in str(exc_info.value)
 
 
 # ===========================================================================

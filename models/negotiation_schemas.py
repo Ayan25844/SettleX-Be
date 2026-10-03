@@ -54,6 +54,7 @@ class NegotiationSessionResponse(BaseModel):
     final_proposal: Optional[Dict[str, Any]] = None
     verification: Optional[Dict[str, Any]] = None
     history: List[Dict[str, Any]] = []
+    demo_mode: bool = False
     created_at: datetime
     updated_at: datetime
 

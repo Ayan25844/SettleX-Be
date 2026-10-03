@@ -6,6 +6,7 @@ from models.schemas import (
 
 from services.financial import (
     calculate_emi,
+    calculate_total_repayment,
     calculate_borrower_utility,
     calculate_lender_utility
 )
@@ -83,10 +84,15 @@ def verify_proposal(
         lender.min_interest_rate
     )
 
+    total_repayment = calculate_total_repayment(emi, proposal.tenure_months)
+    total_interest = round(total_repayment - proposal.amount, 2)
+
     return {
         "valid": len(violations) == 0,
         "violations": violations,
         "emi": emi,
+        "total_repayment": total_repayment,
+        "total_interest": total_interest,
         "borrower_utility": borrower_utility,
         "lender_utility": lender_utility
     }

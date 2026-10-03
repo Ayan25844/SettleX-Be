@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from database import get_db
 from dependencies.auth import get_current_user
@@ -63,8 +65,21 @@ def register(
     )
 
     db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    try:
+        db.commit()
+        db.refresh(new_user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered"
+        )
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to register user due to a database error."
+        )
 
     return new_user
 
@@ -112,10 +127,24 @@ async def login(
 
     normalized_email = str(username).strip().lower()
 
-    # Look up user in database
-    user = db.query(User).filter(User.email == normalized_email).first()
+    # Look up user in database off the event loop
+    user = await run_in_threadpool(
+        lambda: db.query(User).filter(User.email == normalized_email).first()
+    )
 
-    if not user or not verify_password(str(password), user.password_hash):
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Verify password with Argon2 off the event loop
+    password_valid = await run_in_threadpool(
+        lambda: verify_password(str(password), user.password_hash)
+    )
+
+    if not password_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
