@@ -227,15 +227,27 @@ def borrower_agent_node(state: NegotiationState) -> Dict[str, Any]:
         print(log_msg)
     except Exception as e:
         sanitized_msg = _sanitize_error_message(e)
-        response = {
-            "position": "counter",
-            "reason": "Deterministic fallback counter based on borrower profile preference.",
-            "target_interest_rate": borrower_schema.max_interest_rate - 0.5,
-            "target_tenure_months": borrower_schema.preferred_tenure,
-        }
-        pos = "counter"
-        t_rate = response["target_interest_rate"]
-        t_tenure = response["target_tenure_months"]
+        min_rate = float(lender_schema.min_interest_rate)
+        max_rate = float(borrower_schema.max_interest_rate)
+        # ZOPA concession: borrower starts at 25% of ZOPA above min_rate, moving toward 55% over rounds
+        step_fraction = min(0.25 + 0.15 * (round_num - 1), 0.55) if max_rate > min_rate else 0.5
+        calc_rate = round(min_rate + step_fraction * (max_rate - min_rate), 2)
+
+        if round_num >= 3 and current_offer and float(current_offer.get("interest_rate", 999)) <= max_rate:
+            response = {
+                "position": "accept",
+                "reason": f"Terms acceptable: offered rate of {current_offer.get('interest_rate')}% is within borrower limits.",
+            }
+        else:
+            response = {
+                "position": "counter",
+                "reason": f"Deterministic fallback counter (Round {round_num}) based on borrower affordability criteria.",
+                "target_interest_rate": calc_rate,
+                "target_tenure_months": borrower_schema.preferred_tenure,
+            }
+        pos = response["position"]
+        t_rate = response.get("target_interest_rate")
+        t_tenure = response.get("target_tenure_months")
         log_msg = (
             f"[Agent: {agent_type}] [Round: {round_num}] [Model Call: FAIL | {type(e).__name__}: {sanitized_msg}] "
             f"[Position: {pos}] [Target Rate: {t_rate}] [Target Tenure: {t_tenure}] [Fallback: YES]"
@@ -452,15 +464,27 @@ def lender_agent_node(state: NegotiationState) -> Dict[str, Any]:
         print(log_msg)
     except Exception as e:
         sanitized_msg = _sanitize_error_message(e)
-        response = {
-            "position": "counter",
-            "reason": "Deterministic fallback counter based on lender minimum return criteria.",
-            "target_interest_rate": lender_schema.min_interest_rate + 0.5,
-            "target_tenure_months": lender_schema.max_tenure,
-        }
-        pos = "counter"
-        t_rate = response["target_interest_rate"]
-        t_tenure = response["target_tenure_months"]
+        min_rate = float(lender_schema.min_interest_rate)
+        max_rate = float(borrower_schema.max_interest_rate)
+        # ZOPA concession: lender starts at 75% of ZOPA above min_rate, moving down toward 45% over rounds
+        step_fraction = max(0.75 - 0.15 * (round_num - 1), 0.45) if max_rate > min_rate else 0.5
+        calc_rate = round(min_rate + step_fraction * (max_rate - min_rate), 2)
+
+        if round_num >= 3 and current_offer and float(current_offer.get("interest_rate", 0)) >= min_rate:
+            response = {
+                "position": "accept",
+                "reason": f"Terms acceptable: offered rate of {current_offer.get('interest_rate')}% meets lender return criteria.",
+            }
+        else:
+            response = {
+                "position": "counter",
+                "reason": f"Deterministic fallback counter (Round {round_num}) protecting lender yield and capital velocity.",
+                "target_interest_rate": calc_rate,
+                "target_tenure_months": min(borrower_schema.max_tenure, lender_schema.max_tenure),
+            }
+        pos = response["position"]
+        t_rate = response.get("target_interest_rate")
+        t_tenure = response.get("target_tenure_months")
         log_msg = (
             f"[Agent: {agent_type}] [Round: {round_num}] [Model Call: FAIL | {type(e).__name__}: {sanitized_msg}] "
             f"[Position: {pos}] [Target Rate: {t_rate}] [Target Tenure: {t_tenure}] [Fallback: YES]"
