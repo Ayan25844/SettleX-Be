@@ -1,3 +1,5 @@
+import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -6,7 +8,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from dependencies.auth import get_current_user
 from models.match import Match, MatchStatus
-from models.negotiation import NegotiationOffer, NegotiationSession, SessionStatus
+from models.negotiation import AgentType, NegotiationOffer, NegotiationSession, SessionStatus
 from models.negotiation_schemas import (
     CreateSessionRequest,
     NegotiationSessionResponse,
@@ -15,6 +17,8 @@ from models.negotiation_schemas import (
 from models.profile import BorrowerProfile, LenderProfile
 from models.user import User, UserRole
 from services.negotiation_graph import run_negotiation_session
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/negotiations", tags=["negotiations"])
 
@@ -172,6 +176,30 @@ def start_negotiation_session(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+    except Exception as exc:
+        logger.error(
+            f"Unexpected error executing negotiation session {session.id}: {exc}",
+            exc_info=True,
+        )
+        session.status = SessionStatus.NO_AGREEMENT.value
+        session.agreement_found = False
+        session.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(session)
+        result = {
+            "negotiation_history": [
+                {
+                    "round": session.current_round or 1,
+                    "agent": AgentType.SYSTEM.value,
+                    "action": "error",
+                    "reason": f"Negotiation execution encountered an unexpected error: {str(exc)}",
+                    "offer": session.current_offer,
+                    "verification": None,
+                }
+            ],
+            "verification_result": None,
+            "demo_mode": False,
+        }
 
     db.refresh(session)
     return _session_response(

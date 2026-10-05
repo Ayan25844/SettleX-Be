@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import StateGraph, START, END
+from langgraph.errors import GraphRecursionError
 from sqlalchemy.orm import Session
 
 from models.schemas import (
@@ -692,8 +693,8 @@ def decide_next_step_node(state: NegotiationState) -> Dict[str, Any]:
     l_pos = state.get("lender_position")
     verification = state.get("verification_result") or {}
     is_valid = bool(verification.get("valid", False))
-    current_round = state.get("round_number", 1)
-    max_rounds = state.get("max_rounds", 6)
+    current_round = int(state.get("round_number", 1) or 1)
+    max_rounds = max(1, int(state.get("max_rounds", 6) or 6))
     active_offer = state.get("current_offer")
 
     # 1. Outright rejection by either side
@@ -912,8 +913,55 @@ def run_negotiation_session(session_id: int, db: Session) -> Dict[str, Any]:
         "error": None,
     }
 
+    # Graph structure step requirement:
+    # 1 step (initialize) + 4 steps per round (borrower -> lender -> verify -> decide) + 1 step (finalize)
+    # Total exact steps = (4 * max_rounds) + 2.
+    # We allocate a safety buffer of 10 steps for graph lifecycle events:
+    safe_recursion_limit = (4 * max_rounds) + 10
+
     # Execute LangGraph
-    final_state = negotiation_graph.invoke(initial_state)
+    try:
+        final_state = negotiation_graph.invoke(
+            initial_state,
+            config={"recursion_limit": safe_recursion_limit},
+        )
+    except GraphRecursionError as exc:
+        logger.warning(
+            f"Negotiation session {session.id} reached graph recursion limit ({safe_recursion_limit}): {exc}"
+        )
+        safety_reason = (
+            f"Negotiation execution reached its safety limit ({safe_recursion_limit} graph steps) "
+            "without reaching agreement."
+        )
+        final_state = {
+            "session_id": session.id,
+            "borrower_id": session.borrower_id,
+            "lender_id": session.lender_id,
+            "round_number": max_rounds,
+            "max_rounds": max_rounds,
+            "current_offer": session.current_offer,
+            "final_proposal": None,
+            "agreement_found": False,
+            "status": SessionStatus.NO_AGREEMENT.value,
+            "decision": "round_limit",
+            "error": safety_reason,
+            "verification_result": None,
+            "negotiation_history": [
+                {
+                    "round": max_rounds,
+                    "agent": AgentType.SYSTEM.value,
+                    "action": "round_limit",
+                    "reason": safety_reason,
+                    "offer": session.current_offer or {
+                        "amount": b_dict["loan_amount"],
+                        "interest_rate": b_dict.get("max_interest_rate", 12.0),
+                        "tenure_months": b_dict.get("preferred_tenure", 36),
+                        "upfront_payment": 0.0,
+                    },
+                    "verification": None,
+                }
+            ],
+        }
 
     # Persist session state in DB
     session.status = final_state.get("status", SessionStatus.NO_AGREEMENT.value)
